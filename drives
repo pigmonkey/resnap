@@ -1,0 +1,4 @@
+# USB backup drives. Deploy to /usr/local/etc/resnap/drives.
+# Fields: name  uuid
+# One drive per line. Lines beginning with # are ignored.
+

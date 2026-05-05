@@ -1,0 +1,13 @@
+# Paths to exclude from backup. Deploy to /usr/local/etc/resnap/excludes.
+# One pattern per line. Lines beginning with # are ignored.
+# Patterns follow restic exclude syntax (same as --exclude).
+# Note: virtual filesystems (/proc, /sys, /dev, /run) and other mounted
+# filesystems (/mnt, /media) are already excluded via --one-file-system.
+
+/tmp
+/var/cache
+/var/lib/pacman/sync
+/var/lib/docker
+/var/lib/dhcpcd
+/lost+found
+/swapfile

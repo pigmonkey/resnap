@@ -1,0 +1,222 @@
+#!/bin/bash
+# Restore files from a restic USB drive after a system rebuild.
+# Must be run as root. Deploy to /usr/local/bin/resnap-restore.
+#
+# Resumable: --overwrite if-changed skips files whose mtime and size match
+# the snapshot, and repairs any partially-written files via blob-level
+# verification. Kill and restart freely.
+set -euo pipefail
+
+DRIVES_FILE="/usr/local/etc/resnap/drives"
+PASSWORD_FILE="/usr/local/etc/resnap/password"
+RESTORE_FILE="/usr/local/etc/resnap/restore"
+MOUNT_BASE="/mnt"
+REPO_DIR="restic"
+
+export RESTIC_PASSWORD_FILE="$PASSWORD_FILE"
+
+CURRENT_MOUNT=""
+
+# shellcheck disable=SC2329  # called via trap
+cleanup() {
+    if [[ -n "$CURRENT_MOUNT" ]]; then
+        warn "Interrupted; unmounting $CURRENT_MOUNT..."
+        umount "$CURRENT_MOUNT" 2>/dev/null || true
+    fi
+    exit 130
+}
+trap cleanup INT TERM
+
+usage() {
+    cat >&2 <<EOF
+Usage: resnap-restore [--bootstrap] [--uuid UUID] [drive-name [snapshot]]
+
+  --bootstrap   Fetch the restore file from the snapshot before restoring.
+                Use on a fresh rebuild when the restore file has not yet
+                been deployed locally.
+  --uuid UUID   Select drive by filesystem UUID instead of name.
+                Use on a fresh rebuild when the drives file has not yet
+                been deployed locally.
+  drive-name    Name of the drive to restore from (requires drives file).
+                Required if more than one backup drive is listed.
+  snapshot      Restic snapshot ID or "latest" (default: latest)
+EOF
+}
+
+log()  { echo "$(date -Iseconds) $*";              logger -t resnap-restore                "$*"; }
+warn() { echo "$(date -Iseconds) WARNING: $*" >&2; logger -t resnap-restore -p user.warning "WARNING: $*"; }
+err()  { echo "$(date -Iseconds) ERROR: $*"   >&2; logger -t resnap-restore -p user.error   "ERROR: $*";   }
+
+dismount() {
+    (( do_umount )) || return 0
+    log "$DRIVE_NAME: unmounting..."
+    umount "$mountpoint" || warn "$DRIVE_NAME: failed to unmount $mountpoint"
+    CURRENT_MOUNT=""
+    do_umount=0
+}
+
+BOOTSTRAP=0
+UUID_ARG=""
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --bootstrap) BOOTSTRAP=1 ;;
+        --uuid)
+            [[ $# -ge 2 ]] || { err "--uuid requires a value."; exit 1; }
+            UUID_ARG="$2"
+            shift
+            ;;
+        -*) err "Unknown option: $1"; usage; exit 1 ;;
+        *)  ARGS+=("$1") ;;
+    esac
+    shift
+done
+
+DRIVE_ARG="${ARGS[0]:-}"
+SNAPSHOT="${ARGS[1]:-latest}"
+
+if [[ ! -s "$PASSWORD_FILE" ]]; then
+    IFS= read -r -s -p "Restic passphrase: " passphrase
+    echo >&2
+    install -m 600 -o root -g root /dev/null "$PASSWORD_FILE"
+    printf '%s\n' "$passphrase" > "$PASSWORD_FILE"
+    unset passphrase
+fi
+
+if ! (( BOOTSTRAP )) && [[ ! -f "$RESTORE_FILE" ]]; then
+    err "Restore file not found: $RESTORE_FILE"
+    err "Run with --bootstrap to restore it from the snapshot first."
+    exit 1
+fi
+
+# Select drive
+if [[ -n "$UUID_ARG" ]]; then
+    [[ -e "/dev/disk/by-uuid/$UUID_ARG" ]] || { err "No drive found with UUID: $UUID_ARG"; exit 1; }
+    DRIVE_NAME="$UUID_ARG"
+    uuid="$UUID_ARG"
+elif [[ -f "$DRIVES_FILE" ]] && grep -qvE '^\s*(#|$)' "$DRIVES_FILE"; then
+    declare -A DRIVE_UUIDS
+    while read -r name uuid || [[ -n "${name:-}" ]]; do
+        [[ -z "${name:-}" || "${name:0:1}" == "#" ]] && continue
+        DRIVE_UUIDS["$name"]="$uuid"
+    done < "$DRIVES_FILE"
+
+    available=()
+    for name in "${!DRIVE_UUIDS[@]}"; do
+        [[ -e "/dev/disk/by-uuid/${DRIVE_UUIDS[$name]}" ]] && available+=("$name")
+    done
+
+    if [[ -n "$DRIVE_ARG" ]]; then
+        [[ -v "DRIVE_UUIDS[$DRIVE_ARG]" ]] || { err "Unknown drive: $DRIVE_ARG"; usage; exit 1; }
+        [[ -e "/dev/disk/by-uuid/${DRIVE_UUIDS[$DRIVE_ARG]}" ]] || { err "Drive $DRIVE_ARG is not connected."; exit 1; }
+        DRIVE_NAME="$DRIVE_ARG"
+    elif (( ${#available[@]} == 1 )); then
+        DRIVE_NAME="${available[0]}"
+    elif (( ${#available[@]} == 0 )); then
+        err "No backup drives found."
+        exit 1
+    else
+        err "Multiple drives available: ${available[*]}. Specify a drive name."
+        usage
+        exit 1
+    fi
+    uuid="${DRIVE_UUIDS[$DRIVE_NAME]}"
+else
+    # No drives file and no --uuid: enumerate connected drives and exit.
+    candidates=()
+    while IFS= read -r candidate_uuid; do
+        [[ -z "$candidate_uuid" ]] && continue
+        dev_path=$(readlink -f "/dev/disk/by-uuid/$candidate_uuid" 2>/dev/null)
+        [[ -b "${dev_path:-}" ]] || continue
+        findmnt -rno TARGET --source "$dev_path" >/dev/null 2>&1 && continue
+        candidates+=("$candidate_uuid")
+    done < <(find /dev/disk/by-uuid/ -maxdepth 1 -mindepth 1 -printf '%f\n' 2>/dev/null | sort)
+
+    if [[ -f "$DRIVES_FILE" ]]; then
+        err "Drives file is empty: $DRIVES_FILE"
+    else
+        err "Drives file not found: $DRIVES_FILE"
+    fi
+    if (( ${#candidates[@]} == 0 )); then
+        err "No unmounted drives detected."
+        exit 1
+    fi
+
+    echo >&2
+    echo >&2 "Connected drives:"
+    echo >&2
+    for i in "${!candidates[@]}"; do
+        candidate_uuid="${candidates[$i]}"
+        dev_path=$(readlink -f "/dev/disk/by-uuid/$candidate_uuid")
+        size=$(lsblk -ndo SIZE "$dev_path" 2>/dev/null | xargs)
+        parent=$(lsblk -ndo PKNAME "$dev_path" 2>/dev/null | xargs)
+        if [[ -n "$parent" ]]; then
+            model=$(lsblk -ndo MODEL "/dev/$parent" 2>/dev/null | xargs)
+        else
+            model=$(lsblk -ndo MODEL "$dev_path" 2>/dev/null | xargs)
+        fi
+        printf '  %d.  %-36s  %6s  %s\n' "$((i+1))" "$candidate_uuid" "$size" "$model" >&2
+    done
+
+    echo >&2
+    echo >&2 "Rerun with the UUID of the desired drive:"
+    echo >&2 "  resnap-restore --uuid <uuid>"
+    exit 1
+fi
+
+dev="/dev/disk/by-uuid/$uuid"
+mountpoint="$MOUNT_BASE/$uuid"
+repo="$mountpoint/$REPO_DIR"
+
+# Mount
+log "$DRIVE_NAME: found."
+mkdir -p "$mountpoint"
+do_umount=0
+if mountpoint -q "$mountpoint"; then
+    log "$DRIVE_NAME: already mounted at $mountpoint, skipping mount."
+else
+    mount "$dev" "$mountpoint"
+    do_umount=1
+    CURRENT_MOUNT="$mountpoint"
+fi
+
+# Fetch restore file from snapshot if not present locally.
+if (( BOOTSTRAP )) && [[ ! -s "$RESTORE_FILE" ]]; then
+    log "Fetching restore file from snapshot $SNAPSHOT..."
+    mkdir -p "$(dirname "$RESTORE_FILE")"
+    fetch_rc=0
+    # shellcheck disable=SC2094  # $RESTORE_FILE is a path within the snapshot, not a local file being read
+    restic -r "$repo" dump "$SNAPSHOT" "$RESTORE_FILE" > "$RESTORE_FILE" || fetch_rc=$?
+    if (( fetch_rc )); then
+        err "Failed to fetch restore file from snapshot."
+        dismount
+        exit "$fetch_rc"
+    fi
+    log "Restore file fetched."
+fi
+
+# Build --include list from restore file.
+includes=()
+while IFS= read -r line || [[ -n "${line:-}" ]]; do
+    [[ -z "${line:-}" || "${line:0:1}" == "#" ]] && continue
+    includes+=(--include "$line")
+done < "$RESTORE_FILE"
+
+if (( ${#includes[@]} == 0 )); then
+    err "Restore file is empty: $RESTORE_FILE"
+    dismount
+    exit 1
+fi
+
+rc=0
+(
+    log "Restoring snapshot $SNAPSHOT from $DRIVE_NAME to /..."
+    restic -r "$repo" restore "$SNAPSHOT" \
+        --target / \
+        --overwrite if-changed \
+        "${includes[@]}"
+    log "Restore complete."
+) || rc=$?
+
+dismount
+exit $rc

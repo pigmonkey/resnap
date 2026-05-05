@@ -1,0 +1,7 @@
+# Paths to restore after a system rebuild.
+# Deploy to /usr/local/etc/resnap/restore.
+# One path per line. Lines beginning with # are ignored.
+# Paths must be absolute.
+
+/usr/local/etc/resnap/drives
+/usr/local/etc/resnap/excludes
