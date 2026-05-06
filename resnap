@@ -82,6 +82,9 @@ backup_drive() {
         elif [[ "$MODE" == "default" || "$MODE" == "backup" ]]; then
             log "$name: initializing new repository..."
             restic -r "$repo" init
+        else
+            err "$name: no repository found at $repo (run in default or backup mode to initialize)"
+            exit 1
         fi
 
         if [[ "$MODE" == "default" || "$MODE" == "backup" ]]; then
