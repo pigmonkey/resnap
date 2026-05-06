@@ -13,6 +13,7 @@ LOCK_FILE="/var/run/resnap.lock"
 SUBSET_TOTAL=20
 
 export RESTIC_PASSWORD_FILE="$PASSWORD_FILE"
+export RESTIC_CACHE_DIR="$CACHE_DIR"
 RESTORE_SCRIPT="$(dirname "$(realpath "$0")")/resnap-restore"
 
 CURRENT_MOUNT=""
@@ -74,14 +75,16 @@ backup_drive() {
 
     local rc=0
     (
-        restic -r "$repo" unlock
+        set -euo pipefail
+
+        if [[ -f "$repo/config" ]]; then
+            restic -r "$repo" unlock
+        elif [[ "$MODE" == "default" || "$MODE" == "backup" ]]; then
+            log "$name: initializing new repository..."
+            restic -r "$repo" init
+        fi
 
         if [[ "$MODE" == "default" || "$MODE" == "backup" ]]; then
-            if ! restic -r "$repo" cat config &>/dev/null; then
-                log "$name: initializing new repository..."
-                restic -r "$repo" init
-            fi
-
             log "$name: starting backup..."
             restic -r "$repo" backup \
                 --verbose \
@@ -112,12 +115,12 @@ backup_drive() {
             default|check)
                 n=$(( ( $(cat "$subset_file" 2>/dev/null || echo 0) % SUBSET_TOTAL ) + 1 ))
                 log "$name: checking repository (subset ${n}/${SUBSET_TOTAL})..."
-                restic -r "$repo" check --with-cache --cache-dir "$CACHE_DIR" --read-data-subset="${n}/${SUBSET_TOTAL}"
+                restic -r "$repo" check --with-cache --read-data-subset="${n}/${SUBSET_TOTAL}"
                 echo "$n" > "$subset_file"
                 ;;
             full-check)
                 log "$name: running full integrity check..."
-                restic -r "$repo" check --with-cache --cache-dir "$CACHE_DIR" --read-data
+                restic -r "$repo" check --with-cache --read-data
                 rm -f "$subset_file"
                 log "$name: subset counter reset."
                 ;;
