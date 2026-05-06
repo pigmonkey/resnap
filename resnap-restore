@@ -208,6 +208,8 @@ if (( ${#includes[@]} == 0 )); then
     exit 1
 fi
 
+[[ -f "$repo/config" ]] || { err "$DRIVE_NAME: no repository found at $repo"; dismount; exit 1; }
+
 rc=0
 (
     log "Restoring snapshot $SNAPSHOT from $DRIVE_NAME to /..."
