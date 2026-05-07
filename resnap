@@ -68,9 +68,9 @@ backup_drive() {
     if mountpoint -q "$mountpoint"; then
         log "$name: already mounted at $mountpoint, skipping mount."
     else
+        CURRENT_MOUNT="$mountpoint"
         mount "$dev" "$mountpoint"
         do_umount=1
-        CURRENT_MOUNT="$mountpoint"
     fi
 
     local rc=0
