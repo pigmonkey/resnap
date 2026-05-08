@@ -210,6 +210,13 @@ fi
 
 [[ -f "$repo/config" ]] || { err "$DRIVE_NAME: no repository found at $repo"; dismount; exit 1; }
 
+read -r -p "Ready to restore $SNAPSHOT from $DRIVE_NAME. Proceed? (y/n) " confirm
+if [[ "$confirm" != "y" ]]; then
+    log "Aborted."
+    dismount
+    exit 0
+fi
+
 rc=0
 (
     log "Restoring snapshot $SNAPSHOT from $DRIVE_NAME to /..."
